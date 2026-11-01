@@ -8,12 +8,10 @@ This project implements a compact 1D Convolutional Neural Network trained on the
 
 ## Repository Structure
 
-* `configs/`: Configuration YAML files.
-* `data/`: Raw and processed dataset arrays. 
-  > **Note:** Excluded from the GitHub repository.
-* `notebooks/`: CRISP-DM EDA and walkthrough notebook.
-* `src/`: Modular Python source code for data preparation, datasets, models, training, evaluation, and noise robustness testing.
-* `results/`: Evaluation metrics, confusion matrices, and figures.
-* `max78002/`: Setup instructions and toolchain integration artifacts.
-½½½
-
+- `configs/`: Configuration YAML files.
+- `data/`: Raw and processed dataset arrays.
+  > **Note:** This directory is excluded from the GitHub repository.
+- `notebooks/`: CRISP-DM EDA and walkthrough notebook.
+- `src/`: Modular Python source code for data preparation, datasets, models, training, evaluation, and noise robustness testing.
+- `results/`: Evaluation metrics, confusion matrices, and figures.
+- `max78002/`: Setup instructions and toolchain integration artifacts.
