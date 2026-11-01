@@ -1,60 +1,72 @@
 import os
-import pandas as pd
+import wfdb
+import yaml
 import numpy as np
+import pandas as pd
 import neurokit2 as nk
 
 DS1_TRAIN_RECS = ['101', '106', '108', '109', '112', '114', '115', '116', '118', '119', '122', '124', '209', '215', '220', '223', '230']
 DS1_VAL_RECS = ['201', '203', '205', '207', '208']
 DS2_RECS = ['100', '103', '105', '111', '113', '117', '121', '123', '200', '202', '210', '212', '213', '214', '219', '221', '222', '228', '231', '232', '233', '234']
 
+def load_config():
+    config_path = os.path.join(os.path.dirname(__file__), '../configs/config.yaml')
+    if os.path.exists(config_path):
+        with open(config_path, 'r') as f:
+            return yaml.safe_load(f)
+    return {
+        'seed': 42,
+        'data': {'sampling_rate': 360, 'window_before': 90, 'window_after': 90, 'lowcut': 0.5, 'highcut': 40.0}
+    }
+
 def map_aami_classes(raw_type):
-    if raw_type in ['N', 'L', 'R', 'e', 'j']: return 'N'
-    if raw_type in ['A', 'a', 'J', 'S']: return 'S'
-    if raw_type in ['V', 'E']: return 'V'
-    if raw_type in ['F']: return 'F'
+    if raw_type in ['N', 'L', 'R', 'j', 'e']:
+        return 'N'
+    if raw_type in ['A', 'a', 'J', 'S']:
+        return 'S'
+    if raw_type in ['V', 'E']:
+        return 'V'
+    if raw_type in ['F']:
+        return 'F'
     return 'X'
 
-def load_record(record_id, data_dir):
-    csv_path = os.path.join(data_dir, f"{record_id}.csv")
-    txt_path = os.path.join(data_dir, f"{record_id}annotations.txt")
-    
-    if not os.path.exists(csv_path) or not os.path.exists(txt_path):
-        print(f"  [!] Missing files for record {record_id} in {data_dir}. Skipping.")
+def download_mitbih_dataset(data_dir):
+    raw_dir = os.path.join(data_dir, 'raw')
+    os.makedirs(raw_dir, exist_ok=True)
+    all_recs = DS1_TRAIN_RECS + DS1_VAL_RECS + DS2_RECS
+    print("Checking and downloading MIT-BIH records via wfdb...")
+    for rec in all_recs:
+        dat_path = os.path.join(raw_dir, f"{rec}.dat")
+        if not os.path.exists(dat_path):
+            try:
+                wfdb.dl_database('mitdb', raw_dir, records=[rec])
+            except Exception as e:
+                print(f"Failed to download record {rec}: {e}")
+
+def load_record_data(record_id, raw_dir):
+    record_path = os.path.join(raw_dir, record_id)
+    try:
+        record = wfdb.rdrecord(record_path)
+        annotation = wfdb.rdann(record_path, 'atr')
+    except Exception as e:
+        print(f"Error loading record {record_id}: {e}")
         return None, None, None
-        
-    df = pd.read_csv(csv_path)
-    df.columns = [col.strip().strip("'") for col in df.columns]
-    
-    if 'MLII' in df.columns:
-        signal = df['MLII'].values
-    elif 'V5' in df.columns:
-        signal = df['V5'].values
-    else:
-        signal = df.iloc[:, 1].values
-        
-    peaks = []
-    labels = []
-    
-    with open(txt_path, 'r') as f:
-        lines = f.readlines()
-        
-    for line in lines[1:]:
-        parts = line.strip().split()
-        if len(parts) >= 3:
-            mapped_label = map_aami_classes(parts[2])
-            if mapped_label != 'X':
-                peaks.append(int(parts[1]))
-                labels.append(mapped_label)
-                
-    return signal, np.array(peaks), np.array(labels)
+
+    signal = record.p_signal[:, 0]
+    if record_id == '114':
+        if record.n_sig > 1:
+            signal = record.p_signal[:, 1]
+
+    peaks = annotation.sample
+    symbols = annotation.symbol
+    return signal, peaks, symbols
 
 def apply_fft_bandpass(signal, fs=360, lowcut=0.5, highcut=40.0):
     signal = np.array(signal, dtype=np.float64)
     sig_fft = np.fft.rfft(signal)
     freqs = np.fft.rfftfreq(len(signal), d=1.0/fs)
     sig_fft[(freqs < lowcut) | (freqs > highcut)] = 0
-    filtered_sig = np.fft.irfft(sig_fft, n=len(signal))
-    return filtered_sig
+    return np.fft.irfft(sig_fft, n=len(signal))
 
 def normalize_beat(beat_signal):
     mean = np.mean(beat_signal)
@@ -63,114 +75,95 @@ def normalize_beat(beat_signal):
         return beat_signal - mean
     return (beat_signal - mean) / std
 
-def extract_windows(signal, peaks, labels, window_before=90, window_after=90):
+def extract_windows(signal, peaks, symbols, window_before=90, window_after=90):
     X, y = [], []
-    for idx, peak in enumerate(peaks):
+    for peak, sym in zip(peaks, symbols):
+        mapped = map_aami_classes(sym)
+        if mapped == 'X':
+            continue
         start = peak - window_before
         end = peak + window_after
         if start >= 0 and end < len(signal):
             window = signal[start:end]
-            normalized_window = normalize_beat(window)
-            X.append(normalized_window)
-            y.append(labels[idx])
-    return np.array(X), np.array(y)
+            norm_window = normalize_beat(window)
+            X.append(norm_window)
+            y.append(mapped)
+    return np.array(X, dtype=np.float32), np.array(y)
 
 def match_algorithmic_peaks(expert_peaks, expert_labels, algo_peaks, tolerance=36):
-    matched_algo_peaks = []
-    matched_labels = []
-    
-    for idx, ep in enumerate(expert_peaks):
+    matched_algo_peaks, matched_labels = [], []
+    for ep, el in zip(expert_peaks, expert_labels):
         if len(algo_peaks) == 0:
             continue
         distances = np.abs(algo_peaks - ep)
         closest_idx = np.argmin(distances)
         if distances[closest_idx] <= tolerance:
             matched_algo_peaks.append(algo_peaks[closest_idx])
-            matched_labels.append(expert_labels[idx])
-            
+            matched_labels.append(el)
     return np.array(matched_algo_peaks), np.array(matched_labels)
 
 def process_dataset():
+    config = load_config()
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-    data_dir = os.path.join(base_dir, "data") if os.path.basename(os.getcwd()) == "src" else "data"
-    out_dir = "processed"
-    results_dir = "results"
-    
-    print(f"Looking for data in: {os.path.abspath(data_dir)}")
-    os.makedirs(out_dir, exist_ok=True)
+    data_dir = os.path.join(base_dir, 'data')
+    raw_dir = os.path.join(data_dir, 'raw')
+    proc_dir = os.path.join(data_dir, 'processed')
+    results_dir = os.path.join(base_dir, 'results')
+    os.makedirs(proc_dir, exist_ok=True)
     os.makedirs(results_dir, exist_ok=True)
-    
-    datasets = {
-        "train": {"recs": DS1_TRAIN_RECS, "X": [], "y": []},
-        "val": {"recs": DS1_VAL_RECS, "X": [], "y": []},
-        "test_expert": {"recs": DS2_RECS, "X": [], "y": []},
-        "test_algo": {"recs": DS2_RECS, "X": [], "y": []}
+
+    download_mitbih_dataset(data_dir)
+
+    splits = {
+        'train': DS1_TRAIN_RECS,
+        'val': DS1_VAL_RECS,
+        'test_expert': DS2_RECS,
+        'test_algo': DS2_RECS
     }
-    
-    stats_lines = ["Final Dataset Statistics\n", "-"*30 + "\n"]
-    
-    for split_name in ["train", "val", "test"]:
-        recs = datasets[split_name]["recs"] if split_name != "test" else DS2_RECS
-        print(f"\n--- Processing {split_name.upper()} split ({len(recs)} records) ---")
-        
+
+    dataset_arrays = {}
+    for split_name, recs in splits.items():
+        X_list, y_list = [], []
         for rec in recs:
-            print(f"  -> Loading {rec}...", end="", flush=True)
-            signal, expert_peaks, expert_labels = load_record(rec, data_dir)
-            
+            signal, peaks, symbols = load_record_data(rec, raw_dir)
             if signal is None:
-                print(" Failed (File not found).")
                 continue
-                
-            print(" Bandpass (FFT)...", end="", flush=True)
-            cleaned_signal = apply_fft_bandpass(signal, fs=360)
-            
-            if split_name in ["train", "val"]:
-                print(" Extracting...", end="", flush=True)
-                X, y = extract_windows(cleaned_signal, expert_peaks, expert_labels)
-                datasets[split_name]["X"].append(X)
-                datasets[split_name]["y"].append(y)
-                print(f" Extracted {len(y)} beats.")
-                
-            elif split_name == "test":
-                print(" Extract Expert...", end="", flush=True)
-                X_exp, y_exp = extract_windows(cleaned_signal, expert_peaks, expert_labels)
-                datasets["test_expert"]["X"].append(X_exp)
-                datasets["test_expert"]["y"].append(y_exp)
-                
-                print(" Detect Algo...", end="", flush=True)
+            cleaned = apply_fft_bandpass(signal, fs=config['data']['sampling_rate'],
+                                        lowcut=config['data']['lowcut'], highcut=config['data']['highcut'])
+            if split_name in ['train', 'val', 'test_expert']:
+                X, y = extract_windows(cleaned, peaks, symbols,
+                                       window_before=config['data']['window_before'],
+                                       window_after=config['data']['window_after'])
+                if len(X) > 0:
+                    X_list.append(X)
+                    y_list.append(y)
+            elif split_name == 'test_algo':
                 try:
-                    _, info = nk.ecg_peaks(cleaned_signal, sampling_rate=360, method="neurokit", correct_artifacts=False)
-                    algo_peaks = info["ECG_R_Peaks"]
-                    matched_algo_peaks, matched_labels = match_algorithmic_peaks(expert_peaks, expert_labels, algo_peaks)
-                    X_alg, y_alg = extract_windows(cleaned_signal, matched_algo_peaks, matched_labels)
-                    datasets["test_algo"]["X"].append(X_alg)
-                    datasets["test_algo"]["y"].append(y_alg)
-                    print(f" Done ({len(y_exp)} expert, {len(y_alg)} algo).")
+                    _, info = nk.ecg_peaks(cleaned, sampling_rate=config['data']['sampling_rate'], method='neurokit', correct_artifacts=False)
+                    algo_peaks = info['ECG_R_Peaks']
+                    expert_X, expert_y = extract_windows(cleaned, peaks, symbols,
+                                                         window_before=config['data']['window_before'],
+                                                         window_after=config['data']['window_after'])
+                    matched_peaks, matched_labels = match_algorithmic_peaks(peaks, expert_y, algo_peaks)
+                    X, y = extract_windows(cleaned, matched_peaks, matched_labels,
+                                           window_before=config['data']['window_before'],
+                                           window_after=config['data']['window_after'])
+                    if len(X) > 0:
+                        X_list.append(X)
+                        y_list.append(y)
                 except Exception as e:
-                    print(f" [Algo Failed: {e}].")
-    
-    print("\n--- Saving Arrays to Disk ---")
-    for key in datasets.keys():
-        if len(datasets[key]["X"]) > 0:
-            final_X = np.concatenate(datasets[key]["X"], axis=0)
-            final_y = np.concatenate(datasets[key]["y"], axis=0)
-            file_path = os.path.join(out_dir, f"{key}.npz")
-            np.savez_compressed(file_path, X=final_X, y=final_y)
-            print(f"Saved {file_path} (Shape: {final_X.shape})")
-            
-            unique, counts = np.unique(final_y, return_counts=True)
-            dist = dict(zip(unique, counts))
-            stats_lines.append(f"{key.upper()} Split - Total Beats: {len(final_y)}")
-            for cls in ['N', 'S', 'V', 'F']:
-                count = dist.get(cls, 0)
-                stats_lines.append(f"  {cls}: {count} ({(count/len(final_y))*100:.2f}%)")
-            stats_lines.append("\n")
+                    print(f"Algo peak detection failed for record {rec}: {e}")
 
-    stats_file = os.path.join(results_dir, "dataset_statistics.txt")
-    with open(stats_file, "w") as f:
-        f.writelines(stats_lines)
-        
-    print(f"\nSUCCESS! All processing complete. Statistics saved to {stats_file}.")
+        if X_list:
+            final_X = np.concatenate(X_list, axis=0)
+            final_y = np.concatenate(y_list, axis=0)
+            dataset_arrays[split_name] = {'X': final_X, 'y': final_y}
+            np.savez_compressed(os.path.join(proc_dir, f"{split_name}.npz"), X=final_X, y=final_y)
+            print(f"Processed and saved {split_name}.npz with shape {final_X.shape}")
 
-if __name__ == "__main__":
+    assert set(DS1_TRAIN_RECS).isdisjoint(set(DS1_VAL_RECS)), "Data leakage between train and val records"
+    assert set(DS1_TRAIN_RECS + DS1_VAL_RECS).isdisjoint(set(DS2_RECS)), "Data leakage between development and test records"
+    print("Dataset preparation completed with strict split verification.")
+
+if __name__ == '__main__':
     process_dataset()

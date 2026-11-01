@@ -1,0 +1,20 @@
+seed: 42
+data:
+  sampling_rate: 360
+  window_before: 90
+  window_after: 90
+  input_length: 180
+  lowcut: 0.5
+  highcut: 40.0
+training:
+  batch_size: 128
+  epochs_fp32: 35
+  epochs_qat: 15
+  lr: 0.001
+  weight_decay: 0.0001
+  focal_gamma: 2.0
+  focal_power: 0.5
+  patience: 8
+model:
+  base_filters: 16
+  dropout: 0.1
