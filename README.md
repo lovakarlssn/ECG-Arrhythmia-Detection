@@ -1,11 +1,18 @@
 # Edge-Ready ECG Classification using CRISP-DM
 
-This repository contains the data preparation, exploratory data analysis, and modeling pipeline for the MIT-BIH Edge-AI ECG classification project.
+An end-to-end, reproducible Python pipeline for 4-class ECG heartbeat classification targeting the Analog Devices MAX78002 Edge-AI Microcontroller. This repository contains the data preparation, exploratory data analysis, and modeling pipeline for the MIT-BIH Edge-AI ECG classification project.
 
-## Directory Structure
-- `data/`: Place all raw `.csv` and `annotations.txt` files here.
-- `processed/`: Generated dataset arrays will be saved here.
-- `notebooks/`: Contains the Exploratory Data Analysis (EDA) notebook.
-- `src/`: Contains the Python source code for data preparation and modeling.
-- `results/`: Contains the generated statistics and evaluation metrics.
+## Executive Summary
+
+This project implements a compact 1D Convolutional Neural Network trained on the MIT-BIH Arrhythmia Database to classify individual heartbeats into four AAMI EC57 classes (Normal *N*, Supraventricular ectopic *S*, Ventricular ectopic *V*, and Fusion *F*). The architecture strictly satisfies embedded hardware constraints (< 2 MB memory footprint) and utilizes Quantization-Aware Training (QAT) to ensure compatibility with the MAX78002 CNN accelerator.
+
+## Repository Structure
+
+* `configs/`: Configuration YAML files.
+* `data/`: Raw and processed dataset arrays. > **_NOTE:_**Excluded from Github REPO
+* `notebooks/`: CRISP-DM EDA and walkthrough notebook.
+* `src/`: Modular Python source code for data preparation, datasets, models, training, evaluation, and noise robustness testing.
+* `results/`: Evaluation metrics, confusion matrices, and figures.
+* `max78002/`: Setup instructions and toolchain integration artifacts.
+½½½
 

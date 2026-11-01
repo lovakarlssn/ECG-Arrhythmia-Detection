@@ -8,8 +8,8 @@ import torch
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, f1_score, precision_recall_fscore_support, confusion_matrix
 
-from dataset import ECGDataset, CLASS_MAP
-from model import MAX78002_1DCNN, BaselineClassifier
+from dataset import ECGDataset
+from model import load_best_cnn_from_config, audit_model_memory
 
 def evaluate_model():
     base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -22,23 +22,24 @@ def evaluate_model():
     test_ds = ECGDataset(os.path.join(proc_dir, 'test_expert.npz'), is_train=False)
     test_loader = DataLoader(test_ds, batch_size=256, shuffle=False)
 
-    train_ds = ECGDataset(os.path.join(proc_dir, 'train.npz'), is_train=False)
-
-    baseline = BaselineClassifier()
-    baseline.fit(train_ds.X, train_ds.y)
-    baseline_preds = baseline.predict(test_ds.X)
+    with open(os.path.join(results_dir, 'baseline_model.pkl'), 'rb') as f:
+        baseline = pickle.load(f)
+    baseline_preds = baseline.predict(np.clip(test_ds.X / 6.0, -1.0, 1.0))
     baseline_acc = accuracy_score(test_ds.y, baseline_preds)
     baseline_f1 = f1_score(test_ds.y, baseline_preds, average='macro', zero_division=0)
+    base_params = baseline.get_params_count()
 
-    fp32_model = MAX78002_1DCNN(num_classes=4, input_channels=1).to(device)
+    fp32_model = load_best_cnn_from_config(results_dir, device)
     fp32_model.load_state_dict(torch.load(os.path.join(results_dir, 'best_model.pt'), map_location=device))
     fp32_model.set_quantization(False)
     fp32_model.eval()
 
-    int8_model = MAX78002_1DCNN(num_classes=4, input_channels=1).to(device)
+    int8_model = load_best_cnn_from_config(results_dir, device)
     int8_model.load_state_dict(torch.load(os.path.join(results_dir, 'best_model_int8.pt'), map_location=device))
     int8_model.set_quantization(True)
     int8_model.eval()
+
+    cnn_params, fp32_kb, int8_kb = audit_model_memory(int8_model)
 
     def get_nn_preds(model):
         preds, targets = [], []
@@ -61,14 +62,26 @@ def evaluate_model():
     int8_f1 = f1_score(y_true, int8_preds, average='macro', zero_division=0)
 
     metrics_data = [
-        {"Model": "Baseline (Logistic Regression)", "Accuracy": baseline_acc, "Macro_F1": baseline_f1, "Footprint_KB": f"{baseline.get_params_count()*4/1024:.2f} KB"},
-        {"Model": "FP32 Edge Model (1D CNN)", "Accuracy": fp32_acc, "Macro_F1": fp32_f1, "Footprint_KB": "88.98 KB"},
-        {"Model": "Quantized Model (INT8 CNN)", "Accuracy": int8_acc, "Macro_F1": int8_f1, "Footprint_KB": "22.24 KB"}
+        {"Model": f"Baseline ({baseline.model_type.upper()})", "Parameters": base_params, "Accuracy": round(baseline_acc, 4), "Macro_F1": round(baseline_f1, 4), "Footprint_KB": f"{base_params*4/1024:.2f} KB"},
+        {"Model": "FP32 Edge Model (1D CNN)", "Parameters": cnn_params, "Accuracy": round(fp32_acc, 4), "Macro_F1": round(fp32_f1, 4), "Footprint_KB": f"{fp32_kb:.2f} KB"},
+        {"Model": "Quantized Model (INT8 CNN)", "Parameters": cnn_params, "Accuracy": round(int8_acc, 4), "Macro_F1": round(int8_f1, 4), "Footprint_KB": f"{int8_kb:.2f} KB"}
     ]
     metrics_df = pd.DataFrame(metrics_data)
     metrics_df.to_csv(os.path.join(results_dir, 'metrics.csv'), index=False)
-    print("Metrics summary:")
+    print("\n=== Clean Test Metrics (DS2) ===")
     print(metrics_df.to_string(index=False))
+
+    prec, rec, f1, sup = precision_recall_fscore_support(y_true, int8_preds, labels=[0, 1, 2, 3], zero_division=0)
+    per_cls_df = pd.DataFrame({
+        "Class": ["N", "S", "V", "F"],
+        "Precision": np.round(prec, 4),
+        "Sensitivity_Recall": np.round(rec, 4),
+        "F1": np.round(f1, 4),
+        "Support": sup
+    })
+    per_cls_df.to_csv(os.path.join(results_dir, 'per_class_metrics.csv'), index=False)
+    print("\n=== Per-Class Test Metrics (INT8 Model) ===")
+    print(per_cls_df.to_string(index=False))
 
     cm = confusion_matrix(y_true, int8_preds, labels=[0, 1, 2, 3])
     plt.figure(figsize=(8, 6), dpi=300)
@@ -95,8 +108,6 @@ def evaluate_model():
     plt.tight_layout()
     plt.savefig(os.path.join(fig_dir, 'mean_beat_morphologies.png'), dpi=300)
     plt.close()
-
-    print("Evaluation completed and figures saved.")
 
 if __name__ == '__main__':
     evaluate_model()
